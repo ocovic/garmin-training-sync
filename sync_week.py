@@ -213,14 +213,33 @@ def calculate_duration(raw_steps: list[dict]) -> int:
     return total
 
 
+def _pace_str_to_min(pace: str) -> float:
+    """Convert 'M:SS' pace string to decimal minutes per km."""
+    parts = pace.split(":")
+    return int(parts[0]) + int(parts[1]) / 60 if len(parts) == 2 else float(parts[0])
+
+
 def calculate_distance(raw_steps: list[dict]) -> float:
     total = 0.0
 
     for step in raw_steps:
         if step["type"] == "repeat":
             total += int(step["count"]) * calculate_distance(step["steps"])
+        elif step.get("distance_meters", 0):
+            total += float(step["distance_meters"])
         else:
-            total += float(step.get("distance_meters", 0))
+            # Estimate distance from duration + pace target when no explicit distance
+            duration_s = float(step.get("duration_seconds") or step.get("estimated_duration_seconds") or 0)
+            target = step.get("target") or {}
+            if duration_s > 0 and target.get("type") == "pace":
+                pace_min = target.get("min") or target.get("max")
+                if pace_min:
+                    avg_pace = (
+                        (_pace_str_to_min(target["min"]) + _pace_str_to_min(target["max"])) / 2
+                        if target.get("max")
+                        else _pace_str_to_min(pace_min)
+                    )
+                    total += (duration_s / 60) / avg_pace * 1000
 
     return total
 
