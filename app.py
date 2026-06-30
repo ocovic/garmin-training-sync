@@ -975,6 +975,72 @@ def _activity_detail_charts(cached: dict, sport: str):
                 dot = _ZONE_COLORS.get(zrow["zkey"], "#94a3b8")
                 st.markdown(f"**{zrow['zona']}** — {zrow['minutos']:.1f} min · {pct:.0f}%")
 
+    # ── Exportar análisis ──────────────────────────────────────────────────────
+    export_data = {
+        "resumen": {
+            "distancia_km": round((summary_dto.get("distance") or 0) / 1000, 2),
+            "duracion_min": round((summary_dto.get("duration") or 0) / 60, 1),
+            "fc_media_bpm": summary_dto.get("averageHR"),
+            "fc_max_bpm": summary_dto.get("maxHR"),
+            "desnivel_m": summary_dto.get("elevationGain"),
+            "calorias": summary_dto.get("calories"),
+            "temperatura_c": avg_temp,
+        },
+    }
+
+    if laps_raw:
+        export_data["splits_por_km"] = laps_df.to_dict(orient="records")
+
+        eff_ex = laps_df[laps_df["pace"].notna() & laps_df["fc"].notna()].copy()
+        if len(eff_ex) >= 3:
+            eff_ex["eficiencia"] = (eff_ex["pace"] / eff_ex["fc"] * 100).round(3)
+            export_data["eficiencia_cardiaca"] = eff_ex[["km", "pace", "fc", "eficiencia"]].to_dict(orient="records")
+
+        pace_ex = laps_df["pace"].dropna()
+        if len(pace_ex) >= 4:
+            pv = pace_ex.tolist()
+            mid_ex = len(pv) // 2
+            fh = sum(pv[:mid_ex]) / mid_ex
+            sh = sum(pv[mid_ex:]) / (len(pv) - mid_ex)
+            third_ex = max(1, len(pv) // 3)
+            export_data["analisis_ejecucion"] = {
+                "split_ratio_pct": round((sh - fh) / fh * 100, 2),
+                "fade_seg_km": round((sum(pv[-third_ex:]) / third_ex - sum(pv[:third_ex]) / third_ex) * 60, 1),
+                "variacion_pace_cv_pct": round(pace_ex.std() / pace_ex.mean() * 100, 2),
+                "pace_primera_mitad_minkm": round(fh, 3),
+                "pace_segunda_mitad_minkm": round(sh, 3),
+            }
+
+        cad_ex = laps_df["cadencia"].dropna().tolist()
+        if len(cad_ex) >= 4:
+            cf3 = sum(cad_ex[:3]) / 3
+            cl3 = sum(cad_ex[-3:]) / 3
+            export_data["cadencia"] = {
+                "promedio_primeros_3km_spm": round(cf3, 1),
+                "promedio_ultimos_3km_spm": round(cl3, 1),
+                "decaimiento_pct": round((cf3 - cl3) / cf3 * 100, 2),
+            }
+
+    if zones_with_data:
+        total_secs = sum(z["secsInZone"] for z in zones_with_data)
+        export_data["zonas_fc"] = [
+            {
+                "zona": f"Z{z['zoneNumber']}",
+                "limite_inferior_bpm": z["zoneLowBoundary"],
+                "minutos": round(z["secsInZone"] / 60, 1),
+                "porcentaje": round(z["secsInZone"] / total_secs * 100, 1) if total_secs else 0,
+            }
+            for z in zones_with_data
+        ]
+
+    st.divider()
+    st.download_button(
+        label="⬇ Exportar análisis completo (JSON)",
+        data=json.dumps(export_data, ensure_ascii=False, indent=2),
+        file_name="analisis_actividad.json",
+        mime="application/json",
+    )
+
 
 # ── Activities tab ─────────────────────────────────────────────────────────────
 
