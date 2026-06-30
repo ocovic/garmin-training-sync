@@ -794,6 +794,53 @@ def _activity_detail_charts(cached: dict, sport: str):
             })
         laps_df = pd.DataFrame(records)
 
+        # ── Análisis de ejecución ──────────────────────────────────────────────
+        pace_series = laps_df["pace"].dropna()
+        n_km = len(pace_series)
+        if n_km >= 4:
+            pace_vals = pace_series.tolist()
+            mid = n_km // 2
+            first_half_avg = sum(pace_vals[:mid]) / mid
+            second_half_avg = sum(pace_vals[mid:]) / (n_km - mid)
+            split_ratio = (second_half_avg - first_half_avg) / first_half_avg * 100
+
+            third = max(1, n_km // 3)
+            fade_secs = (sum(pace_vals[-third:]) / third - sum(pace_vals[:third]) / third) * 60
+
+            pace_mean = pace_series.mean()
+            pace_cv = (pace_series.std() / pace_mean * 100) if pace_mean > 0 else 0.0
+
+            st.markdown("**Análisis de ejecución**")
+            ec1, ec2, ec3 = st.columns(3)
+            with ec1:
+                split_label = "Negative split ✓" if split_ratio < 0 else ("Neutral" if split_ratio < 2 else "Positive split")
+                st.metric("Split ratio (1ª vs 2ª mitad)", f"{split_ratio:+.1f}%", delta=split_label, delta_color="off")
+            with ec2:
+                fade_label = "Fuerte al final ✓" if fade_secs < 0 else ("Estable" if fade_secs < 15 else "Decaimiento notable")
+                st.metric(f"Fade (primeros vs últimos {third} km)", f"{fade_secs:+.0f} seg/km", delta=fade_label, delta_color="off")
+            with ec3:
+                cv_label = "Muy regular ✓" if pace_cv < 2 else ("Regular" if pace_cv < 4 else "Irregular")
+                st.metric("Variación de pace (CV)", f"{pace_cv:.1f}%", delta=cv_label, delta_color="off")
+
+            msgs = []
+            if split_ratio > 5:
+                rec = (second_half_avg - first_half_avg) * 60 * 0.4
+                msgs.append(
+                    f"Empezaste demasiado rápido: la segunda mitad fue {abs(second_half_avg - first_half_avg) * 60:.0f} seg/km "
+                    f"más lenta. Considera salir {rec:.0f} seg/km más conservador la próxima vez."
+                )
+            elif split_ratio < -2:
+                msgs.append("Buen negative split — administraste el esfuerzo de forma progresiva y aceleraste al final.")
+            if fade_secs > 20:
+                msgs.append(
+                    f"Los últimos {third} km fueron {fade_secs:.0f} seg/km más lentos que los primeros. "
+                    "Puede indicar mala nutrición/hidratación o salida demasiado rápida."
+                )
+            if pace_cv > 5:
+                msgs.append("Ritmo muy irregular km a km. Mantener el pace más constante mejora la economía de carrera.")
+            for m in msgs:
+                st.info(m)
+
         st.markdown("**Splits por kilómetro**")
         sc1, sc2 = st.columns(2)
 
@@ -827,6 +874,28 @@ def _activity_detail_charts(cached: dict, sport: str):
                     use_container_width=True,
                 )
 
+        eff_df = laps_df[laps_df["pace"].notna() & laps_df["fc"].notna()].copy()
+        if len(eff_df) >= 3:
+            eff_df["eficiencia"] = (eff_df["pace"] / eff_df["fc"] * 100).round(3)
+            st.markdown("**Eficiencia cardíaca por km**")
+            st.altair_chart(
+                alt.Chart(eff_df)
+                .mark_line(point=True, color="#f97316", strokeWidth=2)
+                .encode(
+                    x=alt.X("km:O", title="km"),
+                    y=alt.Y("eficiencia:Q", title="pace/FC ×100", scale=alt.Scale(zero=False)),
+                    tooltip=[
+                        alt.Tooltip("km:O", title="km"),
+                        alt.Tooltip("pace:Q", format=".2f", title="pace (min/km)"),
+                        alt.Tooltip("fc:Q", format=".0f", title="FC (bpm)"),
+                        alt.Tooltip("eficiencia:Q", format=".3f", title="pace/FC ×100"),
+                    ],
+                )
+                .properties(height=180),
+                use_container_width=True,
+            )
+            st.caption("↑ Si la línea sube durante la carrera significa que necesitás más FC para mantener el mismo ritmo — señal de fatiga acumulada.")
+
         if is_running and laps_df["cadencia"].notna().any():
             st.markdown("**Dinámica de carrera por km**")
             dyn_specs = [
@@ -852,6 +921,23 @@ def _activity_detail_charts(cached: dict, sport: str):
                         .properties(height=150, title=label),
                         use_container_width=True,
                     )
+
+            cad_clean = laps_df["cadencia"].dropna().tolist()
+            if len(cad_clean) >= 4:
+                cad_first3 = sum(cad_clean[:3]) / 3
+                cad_last3 = sum(cad_clean[-3:]) / 3
+                cad_drop_pct = (cad_first3 - cad_last3) / cad_first3 * 100
+                if cad_drop_pct > 2:
+                    st.caption(
+                        f"📉 Cadencia bajó {cad_first3 - cad_last3:.0f} spm ({cad_drop_pct:.1f}%) "
+                        "en los últimos 3 km — señal de fatiga neuromuscular."
+                    )
+                elif cad_drop_pct < -1:
+                    st.caption(
+                        f"📈 Cadencia aumentó {abs(cad_first3 - cad_last3):.0f} spm al final — buena activación en el tramo final."
+                    )
+                else:
+                    st.caption(f"✓ Cadencia estable durante toda la carrera ({cad_drop_pct:+.1f}% variación primeros vs últimos 3 km).")
 
     zones_with_data = [z for z in hr_zones_raw if (z.get("secsInZone") or 0) > 0]
     if zones_with_data:
@@ -888,6 +974,72 @@ def _activity_detail_charts(cached: dict, sport: str):
                 pct = zrow["minutos"] / total_min * 100 if total_min > 0 else 0
                 dot = _ZONE_COLORS.get(zrow["zkey"], "#94a3b8")
                 st.markdown(f"**{zrow['zona']}** — {zrow['minutos']:.1f} min · {pct:.0f}%")
+
+    # ── Exportar análisis ──────────────────────────────────────────────────────
+    export_data = {
+        "resumen": {
+            "distancia_km": round((summary_dto.get("distance") or 0) / 1000, 2),
+            "duracion_min": round((summary_dto.get("duration") or 0) / 60, 1),
+            "fc_media_bpm": summary_dto.get("averageHR"),
+            "fc_max_bpm": summary_dto.get("maxHR"),
+            "desnivel_m": summary_dto.get("elevationGain"),
+            "calorias": summary_dto.get("calories"),
+            "temperatura_c": avg_temp,
+        },
+    }
+
+    if laps_raw:
+        export_data["splits_por_km"] = laps_df.to_dict(orient="records")
+
+        eff_ex = laps_df[laps_df["pace"].notna() & laps_df["fc"].notna()].copy()
+        if len(eff_ex) >= 3:
+            eff_ex["eficiencia"] = (eff_ex["pace"] / eff_ex["fc"] * 100).round(3)
+            export_data["eficiencia_cardiaca"] = eff_ex[["km", "pace", "fc", "eficiencia"]].to_dict(orient="records")
+
+        pace_ex = laps_df["pace"].dropna()
+        if len(pace_ex) >= 4:
+            pv = pace_ex.tolist()
+            mid_ex = len(pv) // 2
+            fh = sum(pv[:mid_ex]) / mid_ex
+            sh = sum(pv[mid_ex:]) / (len(pv) - mid_ex)
+            third_ex = max(1, len(pv) // 3)
+            export_data["analisis_ejecucion"] = {
+                "split_ratio_pct": round((sh - fh) / fh * 100, 2),
+                "fade_seg_km": round((sum(pv[-third_ex:]) / third_ex - sum(pv[:third_ex]) / third_ex) * 60, 1),
+                "variacion_pace_cv_pct": round(pace_ex.std() / pace_ex.mean() * 100, 2),
+                "pace_primera_mitad_minkm": round(fh, 3),
+                "pace_segunda_mitad_minkm": round(sh, 3),
+            }
+
+        cad_ex = laps_df["cadencia"].dropna().tolist()
+        if len(cad_ex) >= 4:
+            cf3 = sum(cad_ex[:3]) / 3
+            cl3 = sum(cad_ex[-3:]) / 3
+            export_data["cadencia"] = {
+                "promedio_primeros_3km_spm": round(cf3, 1),
+                "promedio_ultimos_3km_spm": round(cl3, 1),
+                "decaimiento_pct": round((cf3 - cl3) / cf3 * 100, 2),
+            }
+
+    if zones_with_data:
+        total_secs = sum(z["secsInZone"] for z in zones_with_data)
+        export_data["zonas_fc"] = [
+            {
+                "zona": f"Z{z['zoneNumber']}",
+                "limite_inferior_bpm": z["zoneLowBoundary"],
+                "minutos": round(z["secsInZone"] / 60, 1),
+                "porcentaje": round(z["secsInZone"] / total_secs * 100, 1) if total_secs else 0,
+            }
+            for z in zones_with_data
+        ]
+
+    st.divider()
+    st.download_button(
+        label="⬇ Exportar análisis completo (JSON)",
+        data=json.dumps(export_data, ensure_ascii=False, indent=2),
+        file_name="analisis_actividad.json",
+        mime="application/json",
+    )
 
 
 # ── Activities tab ─────────────────────────────────────────────────────────────
