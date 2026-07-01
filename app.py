@@ -51,6 +51,7 @@ def init_state():
         "syncing": False,
         "pending_sync": False,
         "force_create": False,
+        "overwrite_requested": False,
         "sync_status_type": None,
         "sync_status_message": None,
         "auth_status_type": None,
@@ -110,7 +111,13 @@ def render_step(step: dict, indent: int = 0):
     if step.get("until_lap"):
         condition = "hasta pulsar Lap"
     elif "duration_seconds" in step:
-        condition = f"{int(step['duration_seconds']) // 60} min"
+        secs = int(step["duration_seconds"])
+        if secs < 60:
+            condition = f"{secs} seg"
+        elif secs % 60 == 0:
+            condition = f"{secs // 60} min"
+        else:
+            condition = f"{secs // 60} min {secs % 60} seg"
     elif "distance_meters" in step:
         condition = f"{step['distance_meters'] / 1000:.2f} km"
     else:
@@ -155,14 +162,49 @@ def render_preview(plan: dict):
 
 # ── Sync logic ─────────────────────────────────────────────────────────────────
 
-def sync_plan(plan: dict, force: bool = False):
+def sync_plan(plan: dict, force: bool = False, overwrite: bool = False):
     """
     Upload and schedule workouts to Garmin Connect.
-    force=True skips the duplicate-name check and always creates.
+    overwrite=True deletes every existing workout on the planned dates before creating.
+    force=True skips the duplicate-name check and always creates (no delete).
     """
     client = st.session_state.client
     if not client:
         raise ValueError("Primero debés autenticarte con Garmin.")
+
+    if overwrite:
+        dates_to_clear = {item["date"] for item in plan["workouts"]}
+        months: dict = {}
+        for d in dates_to_clear:
+            y, m, _ = d.split("-")
+            months.setdefault((int(y), int(m)), set()).add(d)
+
+        for (year, month), dates in months.items():
+            try:
+                response = client.get_scheduled_workouts(year, month)
+                calendar_items = response.get("calendarItems", [])
+            except Exception as e:
+                log(f"No se pudo leer calendario {year}/{month}: {e}")
+                continue
+
+            for item in calendar_items:
+                if item.get("itemType") != "workout":
+                    continue
+                if item.get("date") not in dates:
+                    continue
+                title = item.get("title", "?")
+                schedule_id = item.get("id")
+                workout_id = item.get("workoutId")
+                try:
+                    if schedule_id:
+                        client.unschedule_workout(schedule_id)
+                    if workout_id:
+                        client.delete_workout(workout_id)
+                    log(f"Eliminado: {title} ({item.get('date')})")
+                except Exception as e:
+                    log(f"No se pudo eliminar {title}: {e}")
+
+        force = True  # after clearing, always create
 
     created_count = 0
     skipped_count = 0
@@ -1064,7 +1106,7 @@ def render_activities_tab():
             max_value=_today,
             key="act_tab_date_range",
         )
-        if col2.button("Cargar", key="btn_act_tab_load", use_container_width=True, type="primary"):
+        if col2.button("Cargar", key="btn_act_tab_load", width="stretch", type="primary"):
             s, e = (
                 (act_range[0], act_range[1])
                 if isinstance(act_range, (list, tuple)) and len(act_range) == 2
@@ -1090,7 +1132,7 @@ def render_activities_tab():
     disp["Duración (min)"] = disp["Duración (min)"].round(0)
     disp["Desnivel (m)"] = disp["Desnivel (m)"].round(0)
 
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    st.dataframe(disp, width="stretch", hide_index=True)
     st.download_button(
         "⬇ Descargar tabla CSV",
         data=disp.to_csv(index=False).encode("utf-8"),
@@ -1160,7 +1202,7 @@ def render_activities_tab():
             data=json_str.encode("utf-8"),
             file_name=f"actividad_{activity_id}.json",
             mime="application/json",
-            use_container_width=True,
+            width="stretch",
             key=f"btn_json_{activity_id}",
         )
         if cached.get("gpx"):
@@ -1169,7 +1211,7 @@ def render_activities_tab():
                 data=cached["gpx"],
                 file_name=f"actividad_{activity_id}.gpx",
                 mime="application/gpx+xml",
-                use_container_width=True,
+                width="stretch",
                 key=f"btn_gpx_{activity_id}",
             )
 
@@ -1199,7 +1241,7 @@ with tab_sync:
         email = st.text_input("Email Garmin", key="auth_email")
         password = st.text_input("Password Garmin", type="password", key="auth_password")
 
-        if st.button("Autenticar", use_container_width=True, disabled=st.session_state.syncing):
+        if st.button("Autenticar", width="stretch", disabled=st.session_state.syncing):
             try:
                 with st.spinner("Autenticando con Garmin..."):
                     authenticate(email, password)
@@ -1222,34 +1264,37 @@ with tab_sync:
         st.subheader("Acciones")
 
         generate_clicked = st.button(
-            "Generar Preview", use_container_width=True, disabled=st.session_state.syncing
+            "Generar Preview", width="stretch", disabled=st.session_state.syncing
         )
 
         sync_label = "⏳ Sincronizando..." if st.session_state.syncing else "Sincronizar"
         sync_clicked = st.button(
             sync_label,
-            use_container_width=True,
+            width="stretch",
             type="primary",
             disabled=st.session_state.syncing,
         )
 
         clear_clicked = st.button(
-            "Limpiar", use_container_width=True, disabled=st.session_state.syncing
+            "Limpiar", width="stretch", disabled=st.session_state.syncing
         )
 
         if clear_clicked:
             st.session_state.session_text = ""
             st.session_state.plan = None
             st.session_state.conflicts = []
+            st.session_state.overwrite_requested = False
+            st.session_state.force_create = False
             st.rerun()
 
         # Conflict action selector — only shown when conflicts were detected
         if st.session_state.conflicts:
             st.divider()
+            _radio_idx = 1 if st.session_state.get("force_create", False) else 0
             conflict_action = st.radio(
                 "Acción para conflictos:",
                 ["Saltar duplicados exactos", "Crear igualmente"],
-                key="conflict_action_radio",
+                index=_radio_idx,
                 help=(
                     "**Saltar duplicados**: omite un workout si ya hay uno con el mismo nombre "
                     "en esa fecha.\n\n"
@@ -1326,8 +1371,7 @@ Sesión:
         if st.session_state.conflicts:
             n = len(st.session_state.conflicts)
             st.warning(
-                f"⚠️ {n} workout(s) ya están agendados en esas fechas. "
-                "Revisá la tabla y elegí la acción en el panel izquierdo."
+                f"⚠️ {n} workout(s) ya están agendados en esas fechas."
             )
             conflict_df = pd.DataFrame(
                 [
@@ -1339,7 +1383,20 @@ Sesión:
                     for c in st.session_state.conflicts
                 ]
             )
-            st.dataframe(conflict_df, use_container_width=True, hide_index=True)
+            st.dataframe(conflict_df, width="stretch", hide_index=True)
+
+            overwrite_clicked = st.button(
+                "¿Sobreescribir todos con el nuevo plan?",
+                type="primary",
+                width="stretch",
+                disabled=st.session_state.syncing,
+            )
+            if overwrite_clicked:
+                st.session_state.overwrite_requested = True
+                st.session_state.force_create = True
+                st.session_state.pending_sync = True
+                st.session_state.syncing = True
+                st.rerun()
 
         # Preview cards
         if st.session_state.plan:
@@ -1352,7 +1409,7 @@ Sesión:
                 data=json_data,
                 file_name="plan_semana.json",
                 mime="application/json",
-                use_container_width=True,
+                width="stretch",
                 disabled=st.session_state.syncing,
             )
 
@@ -1383,8 +1440,13 @@ if st.session_state.pending_sync:
             result.pop("warnings", [])
             st.session_state.plan = result
 
-        force = st.session_state.get("force_create", False)
-        created_count, skipped_count = sync_plan(st.session_state.plan, force=force)
+        overwrite = st.session_state.get("overwrite_requested", False)
+        force = st.session_state.get("force_create", False) and not overwrite
+        created_count, skipped_count = sync_plan(
+            st.session_state.plan, force=force, overwrite=overwrite
+        )
+        st.session_state.overwrite_requested = False
+        st.session_state.conflicts = []
 
         st.session_state.sync_status_type = "success"
         st.session_state.sync_status_message = (

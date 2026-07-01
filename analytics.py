@@ -322,15 +322,21 @@ def get_conflicts(client, workouts: list) -> list:
             if item.get("itemType") != "workout":
                 continue
             d = item.get("date", "")
-            by_date.setdefault(d, []).append(item.get("title", ""))
+            by_date.setdefault(d, []).append({
+                "title": item.get("title", ""),
+                "workout_id": item.get("workoutId"),
+                "schedule_id": item.get("id"),
+            })
 
         for w in month_workouts:
-            for existing_title in by_date.get(w["date"], []):
+            for existing in by_date.get(w["date"], []):
                 conflicts.append({
                     "date": w["date"],
                     "planned": w["name"],
-                    "existing": existing_title,
-                    "is_exact_duplicate": existing_title == w["name"],
+                    "existing": existing["title"],
+                    "is_exact_duplicate": existing["title"] == w["name"],
+                    "workout_id": existing["workout_id"],
+                    "schedule_id": existing["schedule_id"],
                 })
 
     return conflicts

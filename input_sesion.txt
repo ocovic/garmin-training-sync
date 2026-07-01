@@ -1,37 +1,5 @@
-Fecha: 2026-06-25
-Nombre: Jue25-Jun - Tempo
-
-Sesión:
-10 min calentamiento Z1
-20 min @6:00-6:10
-10 min enfriamiento Z1
-
----
-Fecha: 2026-06-26
-Nombre: Vie26-Jun - Zona 2
-
-Sesión:
-45 min Z2
-
----
-Fecha: 2026-06-28
-Nombre: Dom28-Jun - Long Run
-
-Sesión:
-12 km suaves Z2
-
----
-Fecha: 2026-06-30
-Nombre: Mar30-Jun - Series 1600
-
-Sesión:
-15 min calentamiento Z1
-4x1600m @5:25-5:30 rec 3min
-10 min enfriamiento Z1
-
----
-Fecha: 2026-07-02
-Nombre: Jue02-Jul - Tempo
+Fecha: 2026-07-01
+Nombre: Mie01-Jul - Tempo
 
 Sesión:
 10 min calentamiento Z1
@@ -39,6 +7,7 @@ Sesión:
 10 min enfriamiento Z1
 
 ---
+
 Fecha: 2026-07-03
 Nombre: Vie03-Jul - Zona 2
 
@@ -46,6 +15,7 @@ Sesión:
 45 min Z2
 
 ---
+
 Fecha: 2026-07-05
 Nombre: Dom05-Jul - Long Run
 
@@ -53,161 +23,38 @@ Sesión:
 14 km suaves Z2
 
 ---
+
 Fecha: 2026-07-07
 Nombre: Mar07-Jul - Series 1000
 
 Sesión:
 15 min calentamiento Z1
-6x1000m @5:15 rec 2min
+6x1000m @5:15 rec 2 min
 10 min enfriamiento Z1
 
 ---
+
 Fecha: 2026-07-09
-Nombre: Jue09-Jul - Tempo
+Nombre: Jue09-Jul - Tempo Fraccionado
 
 Sesión:
 10 min calentamiento Z1
-30 min @5:55-6:00
+2x15 min @5:55 rec 3 min
 10 min enfriamiento Z1
 
 ---
+
 Fecha: 2026-07-10
-Nombre: Vie10-Jul - Zona 2
+Nombre: Vie10-Jul - Descanso
 
 Sesión:
-50 min Z2
+Descanso
 
 ---
+
 Fecha: 2026-07-12
-Nombre: Dom12-Jul - Long Run
+Nombre: Dom12-Jul - Activación
 
 Sesión:
-15 km suaves Z2
-
----
-Fecha: 2026-07-14
-Nombre: Mar14-Jul - Series 1200
-
-Sesión:
-15 min calentamiento Z1
-5x1200m @5:15 rec 2min
-10 min enfriamiento Z1
-
----
-Fecha: 2026-07-16
-Nombre: Jue16-Jul - Tempo Fraccionado
-
-Sesión:
-10 min calentamiento Z1
-2x15min @5:55 rec 3min
-10 min enfriamiento Z1
-
----
-Fecha: 2026-07-17
-Nombre: Vie17-Jul - Zona 2
-
-Sesión:
-45 min Z2
-
----
-Fecha: 2026-07-19
-Nombre: Dom19-Jul - Long Run
-
-Sesión:
-16 km suaves Z2
-
----
-Fecha: 2026-07-21
-Nombre: Mar21-Jul - Series 2000
-
-Sesión:
-15 min calentamiento Z1
-3x2km @5:20 rec 3min
-10 min enfriamiento Z1
-
----
-Fecha: 2026-07-23
-Nombre: Jue23-Jul - Tempo Largo
-
-Sesión:
-10 min calentamiento Z1
-35 min @5:55
-10 min enfriamiento Z1
-
----
-Fecha: 2026-07-24
-Nombre: Vie24-Jul - Zona 2
-
-Sesión:
-40 min Z2
-
----
-Fecha: 2026-07-26
-Nombre: Dom26-Jul - Long Run
-
-Sesión:
-14 km suaves Z2
-
----
-Fecha: 2026-07-28
-Nombre: Mar28-Jul - Series 800
-
-Sesión:
-15 min calentamiento Z1
-8x800m @5:00 rec 90s
-10 min enfriamiento Z1
-
----
-Fecha: 2026-07-30
-Nombre: Jue30-Jul - Tempo 5K
-
-Sesión:
-10 min calentamiento Z1
-5 km @5:50-5:55
-10 min enfriamiento Z1
-
----
-Fecha: 2026-07-31
-Nombre: Vie31-Jul - Zona 2
-
-Sesión:
-40 min suaves Z2
-
----
-Fecha: 2026-08-02
-Nombre: Dom02-Ago - Long Run
-
-Sesión:
-12 km suaves Z2
-
----
-Fecha: 2026-08-04
-Nombre: Mar04-Ago - Series 1000
-
-Sesión:
-15 min calentamiento Z1
-4x1000m @5:10 rec 2min
-10 min enfriamiento Z1
-
----
-Fecha: 2026-08-06
-Nombre: Jue06-Ago - Tempo Corto
-
-Sesión:
-10 min calentamiento Z1
-20 min @5:55
-10 min enfriamiento Z1
-
----
-Fecha: 2026-08-07
-Nombre: Vie07-Ago - Zona 2
-
-Sesión:
-35 min suaves Z2
-
----
-Fecha: 2026-08-09
-Nombre: Dom09-Ago - Carrera
-
-Sesión:
-10 km
+15–20 min trote suave Z1
+3–4 progresiones cortas
