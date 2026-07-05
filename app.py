@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 from garminconnect import Garmin
 
+from garmin_cache import cached_batch_fetch
 from generate_plan import parse_input
 from sync_week import (
     build_workout,
@@ -666,9 +667,9 @@ def render_dashboard():
         with st.spinner(
             f"Cargando sueño y recuperación ({recovery_days} días) — puede tardar unos segundos..."
         ):
-            sleep_df = fetch_sleep_batch(client, recovery_days)
-            hrv_df = fetch_hrv_batch(client, recovery_days)
-            stats_df = fetch_daily_stats_batch(client, recovery_days)
+            sleep_df = cached_batch_fetch("sleep", fetch_sleep_batch, client, recovery_days)
+            hrv_df = cached_batch_fetch("hrv", fetch_hrv_batch, client, recovery_days)
+            stats_df = cached_batch_fetch("stats", fetch_daily_stats_batch, client, recovery_days)
 
         _pmc_quality = (
             "excelente" if _span_days >= 180
@@ -1297,7 +1298,7 @@ def render_sleep_tab():
     if st.button("Calcular hora de dormir recomendada", type="primary", key="btn_sleep_reco"):
         client = st.session_state.client
         with st.spinner(f"Cargando historial de sueño ({history_days} días)..."):
-            sleep_df = fetch_sleep_batch(client, history_days)
+            sleep_df = cached_batch_fetch("sleep", fetch_sleep_batch, client, history_days)
 
         reco = recommend_bedtime(sleep_df, wake_time, target_score)
         st.session_state.sleep_reco_data = sleep_df
