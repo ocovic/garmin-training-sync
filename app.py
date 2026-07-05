@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 import altair as alt
 import pandas as pd
@@ -21,6 +21,7 @@ from analytics import (
     fetch_hrv_batch,
     fetch_sleep_batch,
     get_conflicts,
+    recommend_bedtime,
     weekly_summary,
 )
 
@@ -59,6 +60,8 @@ def init_state():
         "conflicts": [],
         "analytics_data": None,
         "threshold_hr": 165,
+        "sleep_reco_data": None,
+        "sleep_reco": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -1219,6 +1222,135 @@ def render_activities_tab():
         _activity_detail_charts(cached, str(row.get("sport", "")))
 
 
+def _bedtime_chart(sleep_df: pd.DataFrame, reco: dict):
+    df = sleep_df.copy()
+    df = df[df["sleep_score"].notna() & (df["total_hours"] > 0)]
+    if df.empty:
+        return
+
+    points = (
+        alt.Chart(df)
+        .mark_circle(size=70, opacity=0.7, color="#1e40af")
+        .encode(
+            x=alt.X("total_hours:Q", title="Horas dormidas"),
+            y=alt.Y("sleep_score:Q", title="Score de sueño", scale=alt.Scale(domain=[0, 100])),
+            tooltip=[
+                alt.Tooltip("date:T", format="%d/%m/%Y", title="Fecha"),
+                alt.Tooltip("total_hours:Q", format=".1f", title="Horas"),
+                alt.Tooltip("sleep_score:Q", title="Score"),
+            ],
+        )
+    )
+
+    x_line = pd.DataFrame({"total_hours": [df["total_hours"].min(), df["total_hours"].max()]})
+    x_line["fit"] = reco["intercept"] + reco["slope"] * x_line["total_hours"]
+    line = alt.Chart(x_line).mark_line(color="#dc2626", strokeDash=[4, 3]).encode(
+        x="total_hours:Q", y="fit:Q"
+    )
+
+    target_rule = (
+        alt.Chart(pd.DataFrame({"y": [reco["target_score"]]}))
+        .mark_rule(color="#16a34a", strokeDash=[2, 2])
+        .encode(y="y:Q")
+    )
+    duration_rule = (
+        alt.Chart(pd.DataFrame({"x": [reco["duration_hours"]]}))
+        .mark_rule(color="#16a34a", strokeDash=[2, 2])
+        .encode(x="x:Q")
+    )
+
+    st.altair_chart(
+        (points + line + target_rule + duration_rule).properties(height=280),
+        use_container_width=True,
+    )
+
+
+def render_sleep_tab():
+    if not st.session_state.authenticated:
+        st.info("Autentícate en la pestaña **Sincronizar** para ver tus recomendaciones de sueño.")
+        return
+
+    st.subheader("¿A qué hora debería acostarme?")
+    st.caption(
+        "Elegí a qué hora querés despertarte y qué puntaje de sueño querés lograr. "
+        "Con base en tu historial de Garmin (relación entre horas dormidas y score de sueño), "
+        "te sugerimos una hora aproximada para irte a dormir."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    wake_time = c1.time_input("Hora de despertar", value=time(5, 30), key="sleep_wake_time")
+
+    target_choice = c2.selectbox(
+        "Puntuación de sueño objetivo",
+        ["≥ 80 (Bueno)", "≥ 90 (Excelente)", "Personalizado"],
+        key="sleep_target_choice",
+    )
+    if target_choice.startswith("≥ 80"):
+        target_score = 80
+    elif target_choice.startswith("≥ 90"):
+        target_score = 90
+    else:
+        target_score = c2.slider("Score objetivo", 50, 100, 85, key="sleep_target_custom")
+
+    history_days = c3.slider("Días de historial a analizar", 14, 90, 30, step=7, key="sleep_history_days")
+
+    if st.button("Calcular hora de dormir recomendada", type="primary", key="btn_sleep_reco"):
+        client = st.session_state.client
+        with st.spinner(f"Cargando historial de sueño ({history_days} días)..."):
+            sleep_df = fetch_sleep_batch(client, history_days)
+
+        reco = recommend_bedtime(sleep_df, wake_time, target_score)
+        st.session_state.sleep_reco_data = sleep_df
+        st.session_state.sleep_reco = reco
+
+    reco = st.session_state.sleep_reco
+    if reco is None:
+        st.info("Hacé clic en **Calcular hora de dormir recomendada** para ver el resultado.")
+        return
+
+    st.divider()
+
+    if reco["status"] == "insufficient_data":
+        st.warning(
+            f"Solo hay {reco['n_nights']} noches con score de sueño en ese período — "
+            "se necesitan al menos 5 para calcular una recomendación. Probá ampliar los días de historial."
+        )
+        return
+
+    bedtime = reco["bedtime"]
+    low, high = reco["bedtime_range"]
+    hours = int(reco["duration_hours"])
+    minutes = round((reco["duration_hours"] - hours) * 60)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Hora recomendada para acostarte", bedtime.strftime("%H:%M"))
+    m2.metric("Duración de sueño necesaria", f"{hours}h {minutes:02d}min")
+    m3.metric("Noches analizadas", reco["n_nights"])
+
+    st.markdown(
+        f"Para despertarte a las **{wake_time.strftime('%H:%M')}** con un score de sueño "
+        f"**≥ {reco['target_score']}**, apuntá a acostarte entre las **{low.strftime('%H:%M')}** "
+        f"y las **{high.strftime('%H:%M')}** (recomendado: **{bedtime.strftime('%H:%M')}**)."
+    )
+
+    if reco["method"] == "empirical":
+        st.caption(
+            "⚠️ En tu historial, la duración del sueño no explica bien tus variaciones de score "
+            "(o hay poca variación), así que esta hora se basa en el promedio de tus mejores noches "
+            "en vez de una regresión."
+        )
+    else:
+        st.caption(
+            f"Basado en la correlación histórica entre horas dormidas y score de sueño "
+            f"(R² = {reco['r2']:.2f}) sobre {reco['n_nights']} noches. Es una estimación estadística, "
+            "no una garantía — factores como estrés, alcohol o entrenamientos intensos también influyen."
+        )
+
+    st.divider()
+    st.markdown("**Horas dormidas vs. score de sueño**")
+    _bedtime_chart(st.session_state.sleep_reco_data, reco)
+
+
 # ── App layout ─────────────────────────────────────────────────────────────────
 
 init_state()
@@ -1229,7 +1361,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_sync, tab_dash, tab_acts = st.tabs(["🏃 Sincronizar", "📊 Dashboard", "📋 Actividades"])
+tab_sync, tab_dash, tab_acts, tab_sleep = st.tabs(
+    ["🏃 Sincronizar", "📊 Dashboard", "📋 Actividades", "😴 Sueño"]
+)
 
 
 with tab_sync:
@@ -1428,6 +1562,9 @@ with tab_dash:
 
 with tab_acts:
     render_activities_tab()
+
+with tab_sleep:
+    render_sleep_tab()
 
 
 # ── Pending sync handler ───────────────────────────────────────────────────────
