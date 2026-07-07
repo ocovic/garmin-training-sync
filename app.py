@@ -1,11 +1,12 @@
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 from garminconnect import Garmin
 
+from garmin_cache import cached_batch_fetch
 from generate_plan import parse_input
 from sync_week import (
     build_workout,
@@ -21,6 +22,7 @@ from analytics import (
     fetch_hrv_batch,
     fetch_sleep_batch,
     get_conflicts,
+    recommend_bedtime,
     weekly_summary,
 )
 
@@ -51,6 +53,7 @@ def init_state():
         "syncing": False,
         "pending_sync": False,
         "force_create": False,
+        "overwrite_requested": False,
         "sync_status_type": None,
         "sync_status_message": None,
         "auth_status_type": None,
@@ -58,6 +61,8 @@ def init_state():
         "conflicts": [],
         "analytics_data": None,
         "threshold_hr": 165,
+        "sleep_reco_data": None,
+        "sleep_reco": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -110,7 +115,13 @@ def render_step(step: dict, indent: int = 0):
     if step.get("until_lap"):
         condition = "hasta pulsar Lap"
     elif "duration_seconds" in step:
-        condition = f"{int(step['duration_seconds']) // 60} min"
+        secs = int(step["duration_seconds"])
+        if secs < 60:
+            condition = f"{secs} seg"
+        elif secs % 60 == 0:
+            condition = f"{secs // 60} min"
+        else:
+            condition = f"{secs // 60} min {secs % 60} seg"
     elif "distance_meters" in step:
         condition = f"{step['distance_meters'] / 1000:.2f} km"
     else:
@@ -155,14 +166,49 @@ def render_preview(plan: dict):
 
 # ── Sync logic ─────────────────────────────────────────────────────────────────
 
-def sync_plan(plan: dict, force: bool = False):
+def sync_plan(plan: dict, force: bool = False, overwrite: bool = False):
     """
     Upload and schedule workouts to Garmin Connect.
-    force=True skips the duplicate-name check and always creates.
+    overwrite=True deletes every existing workout on the planned dates before creating.
+    force=True skips the duplicate-name check and always creates (no delete).
     """
     client = st.session_state.client
     if not client:
         raise ValueError("Primero debés autenticarte con Garmin.")
+
+    if overwrite:
+        dates_to_clear = {item["date"] for item in plan["workouts"]}
+        months: dict = {}
+        for d in dates_to_clear:
+            y, m, _ = d.split("-")
+            months.setdefault((int(y), int(m)), set()).add(d)
+
+        for (year, month), dates in months.items():
+            try:
+                response = client.get_scheduled_workouts(year, month)
+                calendar_items = response.get("calendarItems", [])
+            except Exception as e:
+                log(f"No se pudo leer calendario {year}/{month}: {e}")
+                continue
+
+            for item in calendar_items:
+                if item.get("itemType") != "workout":
+                    continue
+                if item.get("date") not in dates:
+                    continue
+                title = item.get("title", "?")
+                schedule_id = item.get("id")
+                workout_id = item.get("workoutId")
+                try:
+                    if schedule_id:
+                        client.unschedule_workout(schedule_id)
+                    if workout_id:
+                        client.delete_workout(workout_id)
+                    log(f"Eliminado: {title} ({item.get('date')})")
+                except Exception as e:
+                    log(f"No se pudo eliminar {title}: {e}")
+
+        force = True  # after clearing, always create
 
     created_count = 0
     skipped_count = 0
@@ -621,9 +667,9 @@ def render_dashboard():
         with st.spinner(
             f"Cargando sueño y recuperación ({recovery_days} días) — puede tardar unos segundos..."
         ):
-            sleep_df = fetch_sleep_batch(client, recovery_days)
-            hrv_df = fetch_hrv_batch(client, recovery_days)
-            stats_df = fetch_daily_stats_batch(client, recovery_days)
+            sleep_df = cached_batch_fetch("sleep", fetch_sleep_batch, client, recovery_days)
+            hrv_df = cached_batch_fetch("hrv", fetch_hrv_batch, client, recovery_days)
+            stats_df = cached_batch_fetch("stats", fetch_daily_stats_batch, client, recovery_days)
 
         _pmc_quality = (
             "excelente" if _span_days >= 180
@@ -794,6 +840,53 @@ def _activity_detail_charts(cached: dict, sport: str):
             })
         laps_df = pd.DataFrame(records)
 
+        # ── Análisis de ejecución ──────────────────────────────────────────────
+        pace_series = laps_df["pace"].dropna()
+        n_km = len(pace_series)
+        if n_km >= 4:
+            pace_vals = pace_series.tolist()
+            mid = n_km // 2
+            first_half_avg = sum(pace_vals[:mid]) / mid
+            second_half_avg = sum(pace_vals[mid:]) / (n_km - mid)
+            split_ratio = (second_half_avg - first_half_avg) / first_half_avg * 100
+
+            third = max(1, n_km // 3)
+            fade_secs = (sum(pace_vals[-third:]) / third - sum(pace_vals[:third]) / third) * 60
+
+            pace_mean = pace_series.mean()
+            pace_cv = (pace_series.std() / pace_mean * 100) if pace_mean > 0 else 0.0
+
+            st.markdown("**Análisis de ejecución**")
+            ec1, ec2, ec3 = st.columns(3)
+            with ec1:
+                split_label = "Negative split ✓" if split_ratio < 0 else ("Neutral" if split_ratio < 2 else "Positive split")
+                st.metric("Split ratio (1ª vs 2ª mitad)", f"{split_ratio:+.1f}%", delta=split_label, delta_color="off")
+            with ec2:
+                fade_label = "Fuerte al final ✓" if fade_secs < 0 else ("Estable" if fade_secs < 15 else "Decaimiento notable")
+                st.metric(f"Fade (primeros vs últimos {third} km)", f"{fade_secs:+.0f} seg/km", delta=fade_label, delta_color="off")
+            with ec3:
+                cv_label = "Muy regular ✓" if pace_cv < 2 else ("Regular" if pace_cv < 4 else "Irregular")
+                st.metric("Variación de pace (CV)", f"{pace_cv:.1f}%", delta=cv_label, delta_color="off")
+
+            msgs = []
+            if split_ratio > 5:
+                rec = (second_half_avg - first_half_avg) * 60 * 0.4
+                msgs.append(
+                    f"Empezaste demasiado rápido: la segunda mitad fue {abs(second_half_avg - first_half_avg) * 60:.0f} seg/km "
+                    f"más lenta. Considera salir {rec:.0f} seg/km más conservador la próxima vez."
+                )
+            elif split_ratio < -2:
+                msgs.append("Buen negative split — administraste el esfuerzo de forma progresiva y aceleraste al final.")
+            if fade_secs > 20:
+                msgs.append(
+                    f"Los últimos {third} km fueron {fade_secs:.0f} seg/km más lentos que los primeros. "
+                    "Puede indicar mala nutrición/hidratación o salida demasiado rápida."
+                )
+            if pace_cv > 5:
+                msgs.append("Ritmo muy irregular km a km. Mantener el pace más constante mejora la economía de carrera.")
+            for m in msgs:
+                st.info(m)
+
         st.markdown("**Splits por kilómetro**")
         sc1, sc2 = st.columns(2)
 
@@ -827,6 +920,28 @@ def _activity_detail_charts(cached: dict, sport: str):
                     use_container_width=True,
                 )
 
+        eff_df = laps_df[laps_df["pace"].notna() & laps_df["fc"].notna()].copy()
+        if len(eff_df) >= 3:
+            eff_df["eficiencia"] = (eff_df["pace"] / eff_df["fc"] * 100).round(3)
+            st.markdown("**Eficiencia cardíaca por km**")
+            st.altair_chart(
+                alt.Chart(eff_df)
+                .mark_line(point=True, color="#f97316", strokeWidth=2)
+                .encode(
+                    x=alt.X("km:O", title="km"),
+                    y=alt.Y("eficiencia:Q", title="pace/FC ×100", scale=alt.Scale(zero=False)),
+                    tooltip=[
+                        alt.Tooltip("km:O", title="km"),
+                        alt.Tooltip("pace:Q", format=".2f", title="pace (min/km)"),
+                        alt.Tooltip("fc:Q", format=".0f", title="FC (bpm)"),
+                        alt.Tooltip("eficiencia:Q", format=".3f", title="pace/FC ×100"),
+                    ],
+                )
+                .properties(height=180),
+                use_container_width=True,
+            )
+            st.caption("↑ Si la línea sube durante la carrera significa que necesitás más FC para mantener el mismo ritmo — señal de fatiga acumulada.")
+
         if is_running and laps_df["cadencia"].notna().any():
             st.markdown("**Dinámica de carrera por km**")
             dyn_specs = [
@@ -852,6 +967,23 @@ def _activity_detail_charts(cached: dict, sport: str):
                         .properties(height=150, title=label),
                         use_container_width=True,
                     )
+
+            cad_clean = laps_df["cadencia"].dropna().tolist()
+            if len(cad_clean) >= 4:
+                cad_first3 = sum(cad_clean[:3]) / 3
+                cad_last3 = sum(cad_clean[-3:]) / 3
+                cad_drop_pct = (cad_first3 - cad_last3) / cad_first3 * 100
+                if cad_drop_pct > 2:
+                    st.caption(
+                        f"📉 Cadencia bajó {cad_first3 - cad_last3:.0f} spm ({cad_drop_pct:.1f}%) "
+                        "en los últimos 3 km — señal de fatiga neuromuscular."
+                    )
+                elif cad_drop_pct < -1:
+                    st.caption(
+                        f"📈 Cadencia aumentó {abs(cad_first3 - cad_last3):.0f} spm al final — buena activación en el tramo final."
+                    )
+                else:
+                    st.caption(f"✓ Cadencia estable durante toda la carrera ({cad_drop_pct:+.1f}% variación primeros vs últimos 3 km).")
 
     zones_with_data = [z for z in hr_zones_raw if (z.get("secsInZone") or 0) > 0]
     if zones_with_data:
@@ -889,6 +1021,75 @@ def _activity_detail_charts(cached: dict, sport: str):
                 dot = _ZONE_COLORS.get(zrow["zkey"], "#94a3b8")
                 st.markdown(f"**{zrow['zona']}** — {zrow['minutos']:.1f} min · {pct:.0f}%")
 
+    # ── Exportar análisis ──────────────────────────────────────────────────────
+    export_data = {
+        "resumen": {
+            "distancia_km": round((summary_dto.get("distance") or 0) / 1000, 2),
+            "duracion_min": round((summary_dto.get("duration") or 0) / 60, 1),
+            "fc_media_bpm": summary_dto.get("averageHR"),
+            "fc_max_bpm": summary_dto.get("maxHR"),
+            "desnivel_m": summary_dto.get("elevationGain"),
+            "calorias": summary_dto.get("calories"),
+            "temperatura_c": avg_temp,
+        },
+    }
+
+    if laps_raw:
+        export_data["splits_por_km"] = laps_df.to_dict(orient="records")
+
+        eff_ex = laps_df[laps_df["pace"].notna() & laps_df["fc"].notna()].copy()
+        if len(eff_ex) >= 3:
+            eff_ex["eficiencia"] = (eff_ex["pace"] / eff_ex["fc"] * 100).round(3)
+            export_data["eficiencia_cardiaca"] = eff_ex[["km", "pace", "fc", "eficiencia"]].to_dict(orient="records")
+
+        pace_ex = laps_df["pace"].dropna()
+        if len(pace_ex) >= 4:
+            pv = pace_ex.tolist()
+            mid_ex = len(pv) // 2
+            fh = sum(pv[:mid_ex]) / mid_ex
+            sh = sum(pv[mid_ex:]) / (len(pv) - mid_ex)
+            third_ex = max(1, len(pv) // 3)
+            export_data["analisis_ejecucion"] = {
+                "split_ratio_pct": round((sh - fh) / fh * 100, 2),
+                "fade_seg_km": round((sum(pv[-third_ex:]) / third_ex - sum(pv[:third_ex]) / third_ex) * 60, 1),
+                "variacion_pace_cv_pct": round(pace_ex.std() / pace_ex.mean() * 100, 2),
+                "pace_primera_mitad_minkm": round(fh, 3),
+                "pace_segunda_mitad_minkm": round(sh, 3),
+            }
+
+        cad_ex = laps_df["cadencia"].dropna().tolist()
+        if len(cad_ex) >= 4:
+            cf3 = sum(cad_ex[:3]) / 3
+            cl3 = sum(cad_ex[-3:]) / 3
+            export_data["cadencia"] = {
+                "promedio_primeros_3km_spm": round(cf3, 1),
+                "promedio_ultimos_3km_spm": round(cl3, 1),
+                "decaimiento_pct": round((cf3 - cl3) / cf3 * 100, 2),
+            }
+
+    if zones_with_data:
+        total_secs = sum(z["secsInZone"] for z in zones_with_data)
+        export_data["zonas_fc"] = [
+            {
+                "zona": f"Z{z['zoneNumber']}",
+                "limite_inferior_bpm": z["zoneLowBoundary"],
+                "minutos": round(z["secsInZone"] / 60, 1),
+                "porcentaje": round(z["secsInZone"] / total_secs * 100, 1) if total_secs else 0,
+            }
+            for z in zones_with_data
+        ]
+
+    st.divider()
+    export_json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
+    st.download_button(
+        label="⬇ Exportar análisis completo (JSON)",
+        data=export_json_str,
+        file_name="analisis_actividad.json",
+        mime="application/json",
+    )
+    with st.expander("📋 Copiar análisis completo"):
+        st.code(export_json_str, language="json")
+
 
 # ── Activities tab ─────────────────────────────────────────────────────────────
 
@@ -912,7 +1113,7 @@ def render_activities_tab():
             max_value=_today,
             key="act_tab_date_range",
         )
-        if col2.button("Cargar", key="btn_act_tab_load", use_container_width=True, type="primary"):
+        if col2.button("Cargar", key="btn_act_tab_load", width="stretch", type="primary"):
             s, e = (
                 (act_range[0], act_range[1])
                 if isinstance(act_range, (list, tuple)) and len(act_range) == 2
@@ -938,7 +1139,7 @@ def render_activities_tab():
     disp["Duración (min)"] = disp["Duración (min)"].round(0)
     disp["Desnivel (m)"] = disp["Desnivel (m)"].round(0)
 
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    st.dataframe(disp, width="stretch", hide_index=True)
     st.download_button(
         "⬇ Descargar tabla CSV",
         data=disp.to_csv(index=False).encode("utf-8"),
@@ -1008,7 +1209,7 @@ def render_activities_tab():
             data=json_str.encode("utf-8"),
             file_name=f"actividad_{activity_id}.json",
             mime="application/json",
-            use_container_width=True,
+            width="stretch",
             key=f"btn_json_{activity_id}",
         )
         if cached.get("gpx"):
@@ -1017,12 +1218,144 @@ def render_activities_tab():
                 data=cached["gpx"],
                 file_name=f"actividad_{activity_id}.gpx",
                 mime="application/gpx+xml",
-                use_container_width=True,
+                width="stretch",
                 key=f"btn_gpx_{activity_id}",
             )
 
+        with st.expander("📋 Copiar JSON completo"):
+            st.code(json_str, language="json")
+
         st.divider()
         _activity_detail_charts(cached, str(row.get("sport", "")))
+
+
+def _bedtime_chart(sleep_df: pd.DataFrame, reco: dict):
+    df = sleep_df.copy()
+    df = df[df["sleep_score"].notna() & (df["total_hours"] > 0)]
+    if df.empty:
+        return
+
+    points = (
+        alt.Chart(df)
+        .mark_circle(size=70, opacity=0.7, color="#1e40af")
+        .encode(
+            x=alt.X("total_hours:Q", title="Horas dormidas"),
+            y=alt.Y("sleep_score:Q", title="Score de sueño", scale=alt.Scale(domain=[0, 100])),
+            tooltip=[
+                alt.Tooltip("date:T", format="%d/%m/%Y", title="Fecha"),
+                alt.Tooltip("total_hours:Q", format=".1f", title="Horas"),
+                alt.Tooltip("sleep_score:Q", title="Score"),
+            ],
+        )
+    )
+
+    x_line = pd.DataFrame({"total_hours": [df["total_hours"].min(), df["total_hours"].max()]})
+    x_line["fit"] = reco["intercept"] + reco["slope"] * x_line["total_hours"]
+    line = alt.Chart(x_line).mark_line(color="#dc2626", strokeDash=[4, 3]).encode(
+        x="total_hours:Q", y="fit:Q"
+    )
+
+    target_rule = (
+        alt.Chart(pd.DataFrame({"y": [reco["target_score"]]}))
+        .mark_rule(color="#16a34a", strokeDash=[2, 2])
+        .encode(y="y:Q")
+    )
+    duration_rule = (
+        alt.Chart(pd.DataFrame({"x": [reco["duration_hours"]]}))
+        .mark_rule(color="#16a34a", strokeDash=[2, 2])
+        .encode(x="x:Q")
+    )
+
+    st.altair_chart(
+        (points + line + target_rule + duration_rule).properties(height=280),
+        use_container_width=True,
+    )
+
+
+def render_sleep_tab():
+    if not st.session_state.authenticated:
+        st.info("Autentícate en la pestaña **Sincronizar** para ver tus recomendaciones de sueño.")
+        return
+
+    st.subheader("¿A qué hora debería acostarme?")
+    st.caption(
+        "Elegí a qué hora querés despertarte y qué puntaje de sueño querés lograr. "
+        "Con base en tu historial de Garmin (relación entre horas dormidas y score de sueño), "
+        "te sugerimos una hora aproximada para irte a dormir."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    wake_time = c1.time_input("Hora de despertar", value=time(5, 30), key="sleep_wake_time")
+
+    target_choice = c2.selectbox(
+        "Puntuación de sueño objetivo",
+        ["≥ 80 (Bueno)", "≥ 90 (Excelente)", "Personalizado"],
+        key="sleep_target_choice",
+    )
+    if target_choice.startswith("≥ 80"):
+        target_score = 80
+    elif target_choice.startswith("≥ 90"):
+        target_score = 90
+    else:
+        target_score = c2.slider("Score objetivo", 50, 100, 85, key="sleep_target_custom")
+
+    history_days = c3.slider("Días de historial a analizar", 14, 90, 30, step=7, key="sleep_history_days")
+
+    if st.button("Calcular hora de dormir recomendada", type="primary", key="btn_sleep_reco"):
+        client = st.session_state.client
+        with st.spinner(f"Cargando historial de sueño ({history_days} días)..."):
+            sleep_df = cached_batch_fetch("sleep", fetch_sleep_batch, client, history_days)
+
+        reco = recommend_bedtime(sleep_df, wake_time, target_score)
+        st.session_state.sleep_reco_data = sleep_df
+        st.session_state.sleep_reco = reco
+
+    reco = st.session_state.sleep_reco
+    if reco is None:
+        st.info("Hacé clic en **Calcular hora de dormir recomendada** para ver el resultado.")
+        return
+
+    st.divider()
+
+    if reco["status"] == "insufficient_data":
+        st.warning(
+            f"Solo hay {reco['n_nights']} noches con score de sueño en ese período — "
+            "se necesitan al menos 5 para calcular una recomendación. Probá ampliar los días de historial."
+        )
+        return
+
+    bedtime = reco["bedtime"]
+    low, high = reco["bedtime_range"]
+    hours = int(reco["duration_hours"])
+    minutes = round((reco["duration_hours"] - hours) * 60)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Hora recomendada para acostarte", bedtime.strftime("%H:%M"))
+    m2.metric("Duración de sueño necesaria", f"{hours}h {minutes:02d}min")
+    m3.metric("Noches analizadas", reco["n_nights"])
+
+    st.markdown(
+        f"Para despertarte a las **{wake_time.strftime('%H:%M')}** con un score de sueño "
+        f"**≥ {reco['target_score']}**, apuntá a acostarte entre las **{low.strftime('%H:%M')}** "
+        f"y las **{high.strftime('%H:%M')}** (recomendado: **{bedtime.strftime('%H:%M')}**)."
+    )
+
+    if reco["method"] == "empirical":
+        st.caption(
+            "⚠️ En tu historial, la duración del sueño no explica bien tus variaciones de score "
+            "(o hay poca variación), así que esta hora se basa en el promedio de tus mejores noches "
+            "en vez de una regresión."
+        )
+    else:
+        st.caption(
+            f"Basado en la correlación histórica entre horas dormidas y score de sueño "
+            f"(R² = {reco['r2']:.2f}) sobre {reco['n_nights']} noches. Es una estimación estadística, "
+            "no una garantía — factores como estrés, alcohol o entrenamientos intensos también influyen."
+        )
+
+    st.divider()
+    st.markdown("**Horas dormidas vs. score de sueño**")
+    _bedtime_chart(st.session_state.sleep_reco_data, reco)
 
 
 # ── App layout ─────────────────────────────────────────────────────────────────
@@ -1035,7 +1368,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_sync, tab_dash, tab_acts = st.tabs(["🏃 Sincronizar", "📊 Dashboard", "📋 Actividades"])
+tab_sync, tab_dash, tab_acts, tab_sleep = st.tabs(
+    ["🏃 Sincronizar", "📊 Dashboard", "📋 Actividades", "😴 Sueño"]
+)
 
 
 with tab_sync:
@@ -1047,7 +1382,7 @@ with tab_sync:
         email = st.text_input("Email Garmin", key="auth_email")
         password = st.text_input("Password Garmin", type="password", key="auth_password")
 
-        if st.button("Autenticar", use_container_width=True, disabled=st.session_state.syncing):
+        if st.button("Autenticar", width="stretch", disabled=st.session_state.syncing):
             try:
                 with st.spinner("Autenticando con Garmin..."):
                     authenticate(email, password)
@@ -1070,34 +1405,37 @@ with tab_sync:
         st.subheader("Acciones")
 
         generate_clicked = st.button(
-            "Generar Preview", use_container_width=True, disabled=st.session_state.syncing
+            "Generar Preview", width="stretch", disabled=st.session_state.syncing
         )
 
         sync_label = "⏳ Sincronizando..." if st.session_state.syncing else "Sincronizar"
         sync_clicked = st.button(
             sync_label,
-            use_container_width=True,
+            width="stretch",
             type="primary",
             disabled=st.session_state.syncing,
         )
 
         clear_clicked = st.button(
-            "Limpiar", use_container_width=True, disabled=st.session_state.syncing
+            "Limpiar", width="stretch", disabled=st.session_state.syncing
         )
 
         if clear_clicked:
             st.session_state.session_text = ""
             st.session_state.plan = None
             st.session_state.conflicts = []
+            st.session_state.overwrite_requested = False
+            st.session_state.force_create = False
             st.rerun()
 
         # Conflict action selector — only shown when conflicts were detected
         if st.session_state.conflicts:
             st.divider()
+            _radio_idx = 1 if st.session_state.get("force_create", False) else 0
             conflict_action = st.radio(
                 "Acción para conflictos:",
                 ["Saltar duplicados exactos", "Crear igualmente"],
-                key="conflict_action_radio",
+                index=_radio_idx,
                 help=(
                     "**Saltar duplicados**: omite un workout si ya hay uno con el mismo nombre "
                     "en esa fecha.\n\n"
@@ -1174,8 +1512,7 @@ Sesión:
         if st.session_state.conflicts:
             n = len(st.session_state.conflicts)
             st.warning(
-                f"⚠️ {n} workout(s) ya están agendados en esas fechas. "
-                "Revisá la tabla y elegí la acción en el panel izquierdo."
+                f"⚠️ {n} workout(s) ya están agendados en esas fechas."
             )
             conflict_df = pd.DataFrame(
                 [
@@ -1187,7 +1524,20 @@ Sesión:
                     for c in st.session_state.conflicts
                 ]
             )
-            st.dataframe(conflict_df, use_container_width=True, hide_index=True)
+            st.dataframe(conflict_df, width="stretch", hide_index=True)
+
+            overwrite_clicked = st.button(
+                "¿Sobreescribir todos con el nuevo plan?",
+                type="primary",
+                width="stretch",
+                disabled=st.session_state.syncing,
+            )
+            if overwrite_clicked:
+                st.session_state.overwrite_requested = True
+                st.session_state.force_create = True
+                st.session_state.pending_sync = True
+                st.session_state.syncing = True
+                st.rerun()
 
         # Preview cards
         if st.session_state.plan:
@@ -1200,7 +1550,7 @@ Sesión:
                 data=json_data,
                 file_name="plan_semana.json",
                 mime="application/json",
-                use_container_width=True,
+                width="stretch",
                 disabled=st.session_state.syncing,
             )
 
@@ -1220,6 +1570,9 @@ with tab_dash:
 with tab_acts:
     render_activities_tab()
 
+with tab_sleep:
+    render_sleep_tab()
+
 
 # ── Pending sync handler ───────────────────────────────────────────────────────
 # Runs at the bottom so it triggers after all widgets have rendered.
@@ -1231,8 +1584,13 @@ if st.session_state.pending_sync:
             result.pop("warnings", [])
             st.session_state.plan = result
 
-        force = st.session_state.get("force_create", False)
-        created_count, skipped_count = sync_plan(st.session_state.plan, force=force)
+        overwrite = st.session_state.get("overwrite_requested", False)
+        force = st.session_state.get("force_create", False) and not overwrite
+        created_count, skipped_count = sync_plan(
+            st.session_state.plan, force=force, overwrite=overwrite
+        )
+        st.session_state.overwrite_requested = False
+        st.session_state.conflicts = []
 
         st.session_state.sync_status_type = "success"
         st.session_state.sync_status_message = (

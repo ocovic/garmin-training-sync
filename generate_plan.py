@@ -11,6 +11,8 @@ def normalize(text: str) -> str:
         text.strip()
         .lower()
         .replace(",", ".")
+        .replace("–", "-")
+        .replace("—", "-")
         .replace("á", "a")
         .replace("é", "e")
         .replace("í", "i")
@@ -22,11 +24,11 @@ def normalize(text: str) -> str:
 def parse_duration(text: str) -> int:
     text = normalize(text)
 
-    match = re.match(r"(\d+)\s*(min|mins|minutos?)", text)
+    match = re.match(r"(\d+)(?:\s*-\s*\d+)?\s*(min|mins|minutos?)", text)
     if match:
         return int(match.group(1)) * 60
 
-    match = re.match(r"(\d+)\s*(s|seg|segs|segundos?)", text)
+    match = re.match(r"(\d+)(?:\s*-\s*\d+)?\s*(s|seg|segs|segundos?)", text)
     if match:
         return int(match.group(1))
 
@@ -99,7 +101,7 @@ def build_basic_step(line: str, step_type: str = "run") -> dict:
     step = {"type": step_type}
 
     duration_match = re.match(
-        r"(\d+)\s*(min|mins|minutos?|s|seg|segs|segundos?)",
+        r"(\d+)(?:\s*-\s*\d+)?\s*(min|mins|minutos?|s|seg|segs|segundos?)",
         text,
     )
 
@@ -248,6 +250,22 @@ def infer_step_type(line: str, index: int, total: int) -> str:
     return "run"
 
 
+def parse_progressions(line: str) -> dict | None:
+    text = normalize(line)
+    match = re.match(r"(\d+)(?:\s*-\s*(\d+))?\s*progresion(?:es)?", text)
+    if not match:
+        return None
+    count = int(match.group(1))
+    return {
+        "type": "repeat",
+        "count": count,
+        "steps": [
+            {"type": "run", "duration_seconds": 20},
+            {"type": "recovery", "duration_seconds": 40},
+        ],
+    }
+
+
 def parse_until_lap_step(line: str, step_type: str = "run") -> dict | None:
     text = normalize(line)
 
@@ -286,6 +304,9 @@ def parse_session_lines(lines: list[str]) -> list[dict]:
 
     for index, line in enumerate(clean_lines):
         try:
+            if normalize(line) == "descanso":
+                continue
+
             lap_step = parse_until_lap_step(line)
 
             if lap_step:
@@ -296,6 +317,12 @@ def parse_session_lines(lines: list[str]) -> list[dict]:
 
             if repeat:
                 steps.append(repeat)
+                continue
+
+            progression = parse_progressions(line)
+
+            if progression:
+                steps.append(progression)
                 continue
 
             step_type = infer_step_type(line, index, len(clean_lines))
@@ -343,6 +370,10 @@ def parse_block(block: str) -> dict:
     if not session_lines:
         raise ValueError(f"Falta Sesión en bloque {name}")
 
+    # Rest day: don't generate a Garmin workout
+    if len(session_lines) == 1 and normalize(session_lines[0]) == "descanso":
+        return None
+
     return {
         "date": date,
         "name": name,
@@ -357,7 +388,7 @@ def parse_input(text: str) -> dict:
     _parse_warnings = []
 
     blocks = [block.strip() for block in text.split("---") if block.strip()]
-    workouts = [parse_block(block) for block in blocks]
+    workouts = [w for w in (parse_block(b) for b in blocks) if w is not None]
 
     result: dict = {"workouts": workouts}
     if _parse_warnings:

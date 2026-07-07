@@ -1,8 +1,9 @@
 """
 analytics.py - Training load analysis and recovery metrics from Garmin Connect
 """
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Optional
+import numpy as np
 import pandas as pd
 
 
@@ -188,6 +189,23 @@ def fetch_sleep_batch(client, days: int = 30) -> pd.DataFrame:
             elif isinstance(scores, (int, float)):
                 sleep_score = scores
 
+            # Bedtime / wake time (local wall-clock, ms epoch already offset-adjusted)
+            bedtime = None
+            waketime = None
+            bedtime_hour = None
+            start_ms = dto.get("sleepStartTimestampLocal")
+            end_ms = dto.get("sleepEndTimestampLocal")
+            if start_ms:
+                start_dt = datetime.utcfromtimestamp(start_ms / 1000)
+                bedtime = start_dt.time()
+                # Continuous scale so evening bedtimes (22:00) and past-midnight
+                # bedtimes (00:30) compare naturally: hour 0-11 -> +24.
+                bedtime_hour = start_dt.hour + start_dt.minute / 60
+                if bedtime_hour < 12:
+                    bedtime_hour += 24
+            if end_ms:
+                waketime = datetime.utcfromtimestamp(end_ms / 1000).time()
+
             records.append({
                 "date": date,
                 "total_hours": round(total_sec / 3600, 2),
@@ -198,6 +216,9 @@ def fetch_sleep_batch(client, days: int = 30) -> pd.DataFrame:
                 "sleep_score": sleep_score,
                 "resting_hr": dto.get("restingHeartRate"),
                 "avg_spo2": dto.get("averageSpO2Value"),
+                "bedtime": bedtime,
+                "waketime": waketime,
+                "bedtime_hour": bedtime_hour,
             })
         except Exception:
             continue
@@ -206,6 +227,78 @@ def fetch_sleep_batch(client, days: int = 30) -> pd.DataFrame:
         return pd.DataFrame()
 
     return pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+
+
+def recommend_bedtime(
+    sleep_df: pd.DataFrame,
+    wake_time: time,
+    target_score: int,
+    min_nights: int = 5,
+) -> dict:
+    """Recommend a bedtime to reach ``target_score`` given a fixed wake-up time,
+    based on the historical relationship between sleep duration and sleep score.
+
+    Returns a dict with at least a "status" key:
+      - "insufficient_data": not enough nights with a sleep score to fit anything.
+      - "no_relationship": duration doesn't explain score for this person; falls
+        back to the best empirical duration found in the history.
+      - "ok": a regression-based recommendation was computed.
+    """
+    df = sleep_df.copy()
+    df = df[df["sleep_score"].notna() & (df["total_hours"] > 0)]
+
+    if len(df) < min_nights:
+        return {"status": "insufficient_data", "n_nights": len(df)}
+
+    durations = df["total_hours"].to_numpy(dtype=float)
+    scores = df["sleep_score"].to_numpy(dtype=float)
+
+    # Linear fit: score = a + b * duration_hours
+    b, a = np.polyfit(durations, scores, 1)
+    predicted = a + b * durations
+    ss_res = float(np.sum((scores - predicted) ** 2))
+    ss_tot = float(np.sum((scores - scores.mean()) ** 2))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    residual_std = float(np.std(scores - predicted))
+
+    method = "regression"
+    if b <= 0 or r2 < 0.1:
+        # Duration alone doesn't reliably predict score for this person —
+        # fall back to the empirical average duration on nights that hit target.
+        method = "empirical"
+        good_nights = df[df["sleep_score"] >= target_score]
+        if good_nights.empty:
+            top = df.nlargest(max(3, len(df) // 4), "sleep_score")
+            duration_needed = float(top["total_hours"].mean())
+        else:
+            duration_needed = float(good_nights["total_hours"].mean())
+        margin_hours = 0.5
+    else:
+        duration_needed = (target_score - a) / b
+        # Keep the estimate grounded in what was actually observed — don't let
+        # the line extrapolate far beyond the durations this person has slept.
+        lo = max(4.0, durations.min() - 1.0)
+        hi = min(11.0, durations.max() + 1.0)
+        duration_needed = float(np.clip(duration_needed, lo, hi))
+        margin_hours = min(max(residual_std / max(b, 1e-6), 0.25), 1.0)
+
+    wake_dt = datetime.combine(datetime.today(), wake_time)
+    bedtime_dt = wake_dt - timedelta(hours=duration_needed)
+    bedtime_low = wake_dt - timedelta(hours=duration_needed + margin_hours)
+    bedtime_high = wake_dt - timedelta(hours=max(duration_needed - margin_hours, 0.5))
+
+    return {
+        "status": "ok",
+        "method": method,
+        "n_nights": len(df),
+        "target_score": target_score,
+        "duration_hours": duration_needed,
+        "bedtime": bedtime_dt.time(),
+        "bedtime_range": (bedtime_low.time(), bedtime_high.time()),
+        "r2": r2,
+        "slope": float(b),
+        "intercept": float(a),
+    }
 
 
 # ── HRV ───────────────────────────────────────────────────────────────────────
@@ -322,15 +415,21 @@ def get_conflicts(client, workouts: list) -> list:
             if item.get("itemType") != "workout":
                 continue
             d = item.get("date", "")
-            by_date.setdefault(d, []).append(item.get("title", ""))
+            by_date.setdefault(d, []).append({
+                "title": item.get("title", ""),
+                "workout_id": item.get("workoutId"),
+                "schedule_id": item.get("id"),
+            })
 
         for w in month_workouts:
-            for existing_title in by_date.get(w["date"], []):
+            for existing in by_date.get(w["date"], []):
                 conflicts.append({
                     "date": w["date"],
                     "planned": w["name"],
-                    "existing": existing_title,
-                    "is_exact_duplicate": existing_title == w["name"],
+                    "existing": existing["title"],
+                    "is_exact_duplicate": existing["title"] == w["name"],
+                    "workout_id": existing["workout_id"],
+                    "schedule_id": existing["schedule_id"],
                 })
 
     return conflicts

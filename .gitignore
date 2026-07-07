@@ -18,6 +18,9 @@ venv/
 plan_semana.json
 workout_debug.json
 
+# Local Garmin data cache (personal health data - not for git)
+.garmin_cache/
+
 # OS
 .DS_Store
 Thumbs.db
