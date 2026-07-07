@@ -1080,12 +1080,15 @@ def _activity_detail_charts(cached: dict, sport: str):
         ]
 
     st.divider()
+    export_json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
     st.download_button(
         label="⬇ Exportar análisis completo (JSON)",
-        data=json.dumps(export_data, ensure_ascii=False, indent=2),
+        data=export_json_str,
         file_name="analisis_actividad.json",
         mime="application/json",
     )
+    with st.expander("📋 Copiar análisis completo"):
+        st.code(export_json_str, language="json")
 
 
 # ── Activities tab ─────────────────────────────────────────────────────────────
@@ -1218,6 +1221,9 @@ def render_activities_tab():
                 width="stretch",
                 key=f"btn_gpx_{activity_id}",
             )
+
+        with st.expander("📋 Copiar JSON completo"):
+            st.code(json_str, language="json")
 
         st.divider()
         _activity_detail_charts(cached, str(row.get("sport", "")))
