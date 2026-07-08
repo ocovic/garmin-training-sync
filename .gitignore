@@ -17,6 +17,7 @@ venv/
 # Generated files
 plan_semana.json
 workout_debug.json
+.garminconnect/
 
 # Local Garmin data cache (personal health data - not for git)
 .garmin_cache/
