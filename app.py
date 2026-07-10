@@ -1,9 +1,11 @@
 import json
+import os
 from datetime import datetime, time, timedelta
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 from garminconnect import Garmin
 
 from garmin_cache import cached_batch_fetch
@@ -26,6 +28,8 @@ from analytics import (
     weekly_summary,
 )
 
+load_dotenv()
+TOKENSTORE = os.getenv("GARMINTOKENS", ".garminconnect")
 
 st.set_page_config(page_title="Garmin Training Sync", page_icon="🏃", layout="wide")
 
@@ -73,9 +77,9 @@ def log(message: str):
     st.session_state.logs.append(message)
 
 
-def authenticate(email: str, password: str):
-    client = Garmin(email, password)
-    client.login()
+def authenticate(email: str = "", password: str = ""):
+    client = Garmin(email or None, password or None)
+    client.login(tokenstore=TOKENSTORE)
     st.session_state.client = client
     st.session_state.authenticated = True
     try:
@@ -83,6 +87,18 @@ def authenticate(email: str, password: str):
         hr = data.get("speed_and_heart_rate", {}).get("heartRate")
         if hr and int(hr) > 0:
             st.session_state.threshold_hr = int(hr)
+    except Exception:
+        pass
+
+
+def try_auto_login():
+    """Silently resume a Garmin session from the local tokenstore, if one exists."""
+    if st.session_state.authenticated or st.session_state.get("auto_login_tried"):
+        return
+    st.session_state.auto_login_tried = True
+    try:
+        authenticate()
+        log("Sesión de Garmin restaurada automáticamente.")
     except Exception:
         pass
 
@@ -1361,6 +1377,7 @@ def render_sleep_tab():
 # ── App layout ─────────────────────────────────────────────────────────────────
 
 init_state()
+try_auto_login()
 
 st.markdown('<p class="main-title">Garmin Training Sync</p>', unsafe_allow_html=True)
 st.markdown(
