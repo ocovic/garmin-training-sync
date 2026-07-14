@@ -22,6 +22,15 @@ workout_debug.json
 # Local Garmin data cache (personal health data - not for git)
 .garmin_cache/
 
+# Garmin session tokens (equivalent to a password - not for git)
+.garminconnect/
+
 # OS
 .DS_Store
 Thumbs.db
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+GarminTrainingSync.exe
